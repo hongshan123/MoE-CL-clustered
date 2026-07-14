@@ -13,6 +13,8 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 import mlora
 from mlora.common import LoraBatchDataConfig, MixConfig, MultiLoraBatchData
+from mlora.common.shared_pool import (compute_lora_similarity,
+                                      decide_shared_assignment)
 from mlora.evaluate import validate_mtl5, validate_tencent
 from mlora.model import LLMModel
 from mlora.models.modeling_llama import LlamaDecoderLayer
@@ -98,11 +100,6 @@ def init_adapter_config(
 
     for lora_config in config["lora"]:
         lora_weight = None
-        config_class = MixConfig().from_config(lora_config).check()
-        config_class.adapter_name = lora_config["name"]
-        config_class.task_name = lora_config.get("task_name", "casual")
-        config_class.pad_id = lora_config["pad_id"]  # ClassificationOutputLayer 需要用到 pad_id
-        config_class.benchmark = config["benchmark"]
 
         if adapter_file:
             adapter_dir = f"/root/MoE-CL/results/{adapter_name}/{benchmark}/{args.order}"
@@ -112,6 +109,22 @@ def init_adapter_config(
             logging.info(f"Load adapter: {adapter_file_path}")
             with open(adapter_config_path, "r", encoding="utf8") as fp:
                 adapter_config = json.load(fp)
+            for key in [
+                "shared_pool_mode",
+                "max_shared_experts",
+                "shared_probe_steps",
+                "shared_similarity_threshold",
+                "shared_expert_count",
+                "task_to_shared",
+                "shared_histories",
+            ]:
+                if key in adapter_config and key not in lora_config:
+                    lora_config[key] = adapter_config[key]
+            if (
+                lora_config.get("shared_pool_mode") == "clustered"
+                and "shared_expert_count" not in adapter_config
+            ):
+                lora_config["shared_expert_count"] = 1
             base_model_name_or_path = adapter_config.get("base_model_name_or_path", "")
             if (
                 base_model_name_or_path != ""
@@ -128,7 +141,149 @@ def init_adapter_config(
         else:
             logging.info(f"Initializing adapter from scratch.")
 
+        config_class = MixConfig().from_config(lora_config).check()
+        config_class.adapter_name = lora_config["name"]
+        config_class.task_name = lora_config.get("task_name", "casual")
+        config_class.pad_id = lora_config["pad_id"]  # ClassificationOutputLayer 需要用到 pad_id
+        config_class.benchmark = config["benchmark"]
         llm_model.init_lora_layer_weight(config_class, lora_weight)
+
+
+def is_clustered_shared_mode() -> bool:
+    return adapter_name == "moe-cl" and config["lora"][0].get("shared_pool_mode", "single") == "clustered"
+
+
+def _build_input_args(batch_data, task_id: int, shared_lora_name: str = None, probe_only: bool = False):
+    batch_tokens = batch_data["tokens"]
+    batch_labels = batch_data["label"]
+    batch_masks = batch_data["mask"]
+    input_args = MultiLoraBatchData(
+        attention_masks_=batch_masks,
+        batch_labels_=batch_labels,
+        batch_tokens_=batch_tokens,
+        lora_batch_data_config_=[
+            LoraBatchDataConfig(
+                batch_start_idx_=0, batch_end_idx_=batch_tokens.size(0)
+            )
+        ],
+    )
+    input_args.task_id = task_id
+    input_args.is_train = True
+    input_args.shared_lora_name = shared_lora_name
+    input_args.probe_only = probe_only
+    return input_args
+
+
+def _set_trainable_for_probe(model: LLMModel, lora_name: str):
+    old_flags = {name: param.requires_grad for name, param in model.named_parameters()}
+    for _, param in model.named_parameters():
+        param.requires_grad = False
+    for name, param in model.named_parameters():
+        if f".loras_.{lora_name}." in name:
+            param.requires_grad = True
+    return old_flags
+
+
+def _restore_trainable_flags(model: LLMModel, old_flags: Dict[str, bool]):
+    for name, param in model.named_parameters():
+        if name in old_flags:
+            param.requires_grad = old_flags[name]
+
+
+def run_shared_probe(model: LLMModel, train_dataset, task_id: int, rank: int):
+    state = model.shared_pool_state_
+    model.ensure_lora_expert("probe")
+    old_flags = _set_trainable_for_probe(model, "probe")
+    probe_params = [param for param in model.parameters() if param.requires_grad]
+    optimizer = torch.optim.AdamW(probe_params, lr=lr, weight_decay=0.0)
+    dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
+    model.train()
+    steps = 0
+    torch.manual_seed(1337 + task_id)
+    for batch_data in dataloader:
+        if steps >= state.probe_steps:
+            break
+        input_args = _build_input_args(
+            batch_data, task_id=task_id, shared_lora_name="probe", probe_only=True
+        )
+        output = model.forward(input_args)[0]
+        optimizer.zero_grad()
+        output.loss.backward()
+        optimizer.step()
+        steps += 1
+    _restore_trainable_flags(model, old_flags)
+    if rank == 0:
+        logging.info(f"[Shared Probe] task_id = {task_id}, steps = {steps}")
+    return model.lora_delta_map("probe")
+
+
+def prepare_clustered_shared_training(model: LLMModel, train_dataset, task_id: int, rank: int):
+    state = model.shared_pool_state_
+    probe_delta = run_shared_probe(model, train_dataset, task_id, rank)
+    similarities = {}
+    for shared_id in range(state.shared_expert_count):
+        shared_name = f"shared{shared_id}"
+        similarities[shared_id] = compute_lora_similarity(
+            probe_delta, model.lora_delta_map(shared_name)
+        )
+    selected_shared_id, decision, max_similarity = decide_shared_assignment(
+        similarities,
+        state.shared_expert_count,
+        state.max_shared_experts,
+        state.similarity_threshold,
+    )
+    if rank == 0:
+        logging.info("[Shared Similarity]")
+        logging.info(f"task_id = {task_id}")
+        for shared_id in sorted(similarities):
+            logging.info(f"shared_{shared_id} = {similarities[shared_id]}")
+        logging.info(f"max_similarity = {max_similarity}")
+        logging.info("[Shared Assignment]")
+        logging.info(f"task_id = {task_id}")
+        logging.info(f"selected_shared_id = {selected_shared_id}")
+        logging.info(f"decision = {decision}")
+        logging.info(f"pool_size = {state.shared_expert_count}")
+        logging.info(f"max_shared_experts = {state.max_shared_experts}")
+
+    if decision == "CREATE":
+        model.ensure_lora_expert(f"shared{selected_shared_id}", source_name="probe")
+        state.shared_expert_count = selected_shared_id + 1
+        state.shared_histories.setdefault(selected_shared_id, [])
+
+    model.ensure_lora_expert("working_shared", source_name=f"shared{selected_shared_id}")
+    model.active_shared_lora_name_ = "working_shared"
+    model.delete_lora_expert("probe")
+    return selected_shared_id, decision
+
+
+def finalize_clustered_shared_training(model: LLMModel, selected_shared_id: int, decision: str, task_id: int, rank: int):
+    state = model.shared_pool_state_
+    history = state.shared_histories.setdefault(selected_shared_id, [])
+    history_size_before = len(history)
+    shared_name = f"shared{selected_shared_id}"
+    if decision == "CREATE":
+        model.ensure_lora_expert(shared_name, source_name="working_shared")
+        lambda_t = 1.0
+    else:
+        lambda_t = model.consolidate_lora_expert(
+            shared_name, "working_shared", history_size_before
+        )
+    state.task_to_shared[int(task_id)] = int(selected_shared_id)
+    if int(task_id) not in history:
+        history.append(int(task_id))
+    config["lora"][0]["shared_expert_count"] = state.shared_expert_count
+    config["lora"][0]["task_to_shared"] = {str(k): int(v) for k, v in state.task_to_shared.items()}
+    config["lora"][0]["shared_histories"] = {
+        str(k): [int(tid) for tid in tids] for k, tids in state.shared_histories.items()
+    }
+    if rank == 0:
+        logging.info("[Shared Consolidation]")
+        logging.info(f"shared_id = {selected_shared_id}")
+        logging.info(f"history_size_before = {history_size_before}")
+        logging.info(f"lambda = {lambda_t}")
+        logging.info(f"history_size_after = {len(history)}")
+    model.active_shared_lora_name_ = None
+    model.delete_lora_expert("working_shared")
 
 
 def setup(rank, world_size):
@@ -207,9 +362,19 @@ def train(rank, world_size, train_dataset, val_dataset, all_test_datasets):
     logging.info(f"Starting training on GPU {rank}")
 
     # STEP 1: ********************Training phase.********************
+    selected_shared_id = None
+    shared_decision = None
     if not args.rand_init:
         _, model = load_base_model(rank)
-        ddp_model = get_ddp_model(model, rank)
+        if is_clustered_shared_mode():
+            init_adapter_config(config, model, args.load_adapter_file)
+            task_id = TaskName2Id[args.train_task]
+            selected_shared_id, shared_decision = prepare_clustered_shared_training(
+                model, train_dataset, task_id, rank
+            )
+            ddp_model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        else:
+            ddp_model = get_ddp_model(model, rank)
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
         sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
@@ -367,10 +532,20 @@ def train(rank, world_size, train_dataset, val_dataset, all_test_datasets):
                                     f"/root/MoE-CL/results/{adapter_name}/{benchmark}/{args.order}/{args.train_task}_finetuned.bin",
                                 )
 
+                            elif is_clustered_shared_mode():
+                                pass
                             else:  # Save the parameters of the adapter
                                 save_adapter_weight(ddp_model.module, acc=best_acc)
 
                             logging.info(f"New best accuracy: {best_acc:.4f}, save best model")
+
+        if is_clustered_shared_mode():
+            finalize_clustered_shared_training(
+                ddp_model.module, selected_shared_id, shared_decision, task_id, rank
+            )
+            dist.barrier()
+            if rank == 0:
+                save_adapter_weight(ddp_model.module, acc=best_acc)
 
     # STEP 2: ********************Testing phase.********************
     # 2.1 Log output
@@ -485,6 +660,8 @@ def save_adapter_weight(model: LLMModel, acc=None):
 
     lora_weight_dict = model.get_lora_weight_dict()
     lora_config_dict = model.adapter_configs_[adapter_name].export()
+    if adapter_name == "moe-cl" and model.shared_pool_state_.mode == "clustered":
+        lora_config_dict.update(model.shared_pool_state_.export())
     lora_config_dict["base_model_name_or_path"] = model.name_or_path_
     lora_config_dict["task_type"] = "qa"
     lora_config_dict["best_acc"] = acc

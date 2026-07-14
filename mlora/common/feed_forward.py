@@ -46,7 +46,12 @@ class FeedForward(torch.nn.Module):
                 start_idx = lora_config.batch_start_idx_
                 end_idx = lora_config.batch_end_idx_
 
-                kwargs = {"attention_mask": input_args.attention_masks_}
+                kwargs = {
+                    "attention_mask": input_args.attention_masks_,
+                    "selected_shared_id": input_args.selected_shared_id,
+                    "shared_lora_name": input_args.shared_lora_name,
+                    "probe_only": input_args.probe_only,
+                }
                 current_hidden_states, current_classifier_outputs = self.moes_.forward(self.mlp_, data[start_idx:end_idx], input_args.task_id, **kwargs)
                 classifier_probs_[idx] = current_classifier_outputs
             

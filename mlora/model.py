@@ -13,7 +13,9 @@ from transformers import AutoModelForCausalLM
 from mlora.backends import get_backend
 from mlora.common import (LLMDecoder, LLMForCausalLM, LLMModelArgs,
                           LLMModelOutput, LLMOutput, LoraConfig, MixConfig,
-                          MultiLoraBatchData, lora_config_factory)
+                          MultiLoraBatchData, SharedPoolState,
+                          lora_config_factory, lora_delta_map_from_state_dict,
+                          normalize_shared_pool_state)
 from mlora.models import from_pretrained
 from mlora.utils import is_package_available
 
@@ -294,57 +296,55 @@ def init_lora_layer_weight(
 
     moe_layer_name_list = list(layer.mlp_.lora_state_dict().keys())
 
+    def load_lora_pair(layer_name: str, expert_name: str):
+        if weight is None:
+            return None, None
+        map_table = {
+            "w1_proj": "w1_",
+            "w2_proj": "w2_",
+            "w3_proj": "w3_",
+            "q_proj": "wq_",
+            "k_proj": "wk_",
+            "v_proj": "wv_",
+            "o_proj": "wo_",
+        }
+        module_root = "mlp_.mlp_" if layer_name in ["w1_proj", "w2_proj", "w3_proj"] else "self_attn_"
+        module_name = map_table[layer_name]
+        lora_a_name = f"seq_module_.layer{layer.layer_id_}.wrapper_module_.{module_root}.{module_name}.loras_.{expert_name}.lora_a_.weight"
+        lora_b_name = f"seq_module_.layer{layer.layer_id_}.wrapper_module_.{module_root}.{module_name}.loras_.{expert_name}.lora_b_.weight"
+        if expert_name == "shared0" and lora_a_name not in weight:
+            legacy_a = lora_a_name.replace(".loras_.shared0.", ".loras_.expert0.")
+            legacy_b = lora_b_name.replace(".loras_.shared0.", ".loras_.expert0.")
+            if legacy_a in weight and legacy_b in weight:
+                return weight[legacy_a], weight[legacy_b]
+        if lora_a_name not in weight:
+            raise KeyError(f"can not found the layer {lora_a_name} in model")
+        if lora_b_name not in weight:
+            raise KeyError(f"can not found the layer {lora_b_name} in model")
+        return weight[lora_a_name], weight[lora_b_name]
+
     for idx, layer_name in enumerate(linear_layer_name_list):
         if layer_name in target and target[layer_name]:
             if layer_name in moe_layer_name_list:
-                for expert_idx in range(
-                    config.num_experts_
-                    if isinstance(config.num_experts_, int)
-                    else config.num_experts_[index]
-                ):
-                    lora_a = None
-                    lora_b = None
-                    if weight is not None:
-                        map_table = {
-                            "w1_proj": "w1_",
-                            "w2_proj": "w2_",
-                            "w3_proj": "w3_",
-                        }
-                        lora_a_name = f"seq_module_.layer{layer.layer_id_}.wrapper_module_.mlp_.mlp_.{map_table[layer_name]}.loras_.expert{expert_idx}.lora_a_.weight"
-                        lora_b_name = f"seq_module_.layer{layer.layer_id_}.wrapper_module_.mlp_.mlp_.{map_table[layer_name]}.loras_.expert{expert_idx}.lora_b_.weight"
-
-                        if lora_a_name not in weight:
-                            raise f"can not found the layer {lora_a_name} in model"
-                        if lora_b_name not in weight:
-                            raise f"can not found the layer {lora_b_name} in model"
-
-                        lora_a = weight[lora_a_name]
-                        lora_b = weight[lora_b_name]
-
+                if config.adapter_name == "moe-cl" and config.shared_pool_mode_ == "clustered":
+                    expert_names = [f"shared{sid}" for sid in range(config.shared_expert_count_)]
+                    expert_names += [f"expert{expert_idx}" for expert_idx in range(1, config.num_experts_)]
+                else:
+                    expert_names = [
+                        f"expert{expert_idx}"
+                        for expert_idx in range(
+                            config.num_experts_
+                            if isinstance(config.num_experts_, int)
+                            else config.num_experts_[index]
+                        )
+                    ]
+                for expert_name in expert_names:
+                    lora_a, lora_b = load_lora_pair(layer_name, expert_name)
                     linear_layer_list[idx].init_lora_weight(
-                        config.expert_config(expert_idx), (lora_a, lora_b), expert_idx
+                        config.expert_config(0), (lora_a, lora_b), lora_name=expert_name
                     )
             else:
-                lora_a = None
-                lora_b = None
-                if weight is not None:
-                    map_table = {
-                        "q_proj": "wq_",
-                        "k_proj": "wk_",
-                        "v_proj": "wv_",
-                        "o_proj": "wo_",
-                    }
-                    lora_a_name = f"seq_module_.layer{layer.layer_id_}.wrapper_module_.self_attn_.{map_table[layer_name]}.loras_.expert0.lora_a_.weight"
-                    lora_b_name = f"seq_module_.layer{layer.layer_id_}.wrapper_module_.self_attn_.{map_table[layer_name]}.loras_.expert0.lora_b_.weight"
-
-                    if lora_a_name not in weight:
-                        raise f"can not found the layer {lora_a_name} in model"
-                    if lora_b_name not in weight:
-                        raise f"can not found the layer {lora_b_name} in model"
-
-                    lora_a = weight[lora_a_name]
-                    lora_b = weight[lora_b_name]
-
+                lora_a, lora_b = load_lora_pair(layer_name, "expert0")
                 linear_layer_list[idx].init_lora_weight(config, (lora_a, lora_b))
 
 
@@ -386,6 +386,8 @@ class LLMModel(torch.nn.Module):
 
         # adapter configs
         self.adapter_configs_: Dict[str, LoraConfig] = {}
+        self.shared_pool_state_: SharedPoolState = SharedPoolState()
+        self.active_shared_lora_name_: Optional[str] = None
 
     # compute the model: output probs
     def forward(self, input_args: MultiLoraBatchData) -> List[LLMModelOutput]:
@@ -432,6 +434,13 @@ class LLMModel(torch.nn.Module):
         data = (tokens, causal_mask, input_args)
 
         if "moe-cl" in self.adapter_configs_:
+            if self.shared_pool_state_.mode == "clustered":
+                if self.active_shared_lora_name_ is not None and input_args.shared_lora_name is None:
+                    input_args.shared_lora_name = self.active_shared_lora_name_
+                if input_args.shared_lora_name is None:
+                    input_args.selected_shared_id = self.shared_pool_state_.task_to_shared.get(
+                        int(input_args.task_id), input_args.selected_shared_id
+                    )
             for seq_layer in self.seq_module_:
                 data = seq_layer.forward(data)
 
@@ -611,6 +620,21 @@ class LLMModel(torch.nn.Module):
     def init_lora_layer_weight(
         self, config: LoraConfig, weight: Optional[Dict[str, torch.Tensor]]
     ):
+        if isinstance(config, MixConfig) and config.adapter_name == "moe-cl":
+            self.shared_pool_state_ = normalize_shared_pool_state(
+                SharedPoolState(
+                    mode=config.shared_pool_mode_,
+                    max_shared_experts=config.max_shared_experts_,
+                    probe_steps=config.shared_probe_steps_,
+                    similarity_threshold=config.shared_similarity_threshold_,
+                    shared_expert_count=config.shared_expert_count_,
+                    task_to_shared=config.task_to_shared_ or {},
+                    shared_histories=config.shared_histories_ or {},
+                )
+            )
+            config.shared_expert_count_ = self.shared_pool_state_.shared_expert_count
+            config.task_to_shared_ = self.shared_pool_state_.task_to_shared
+            config.shared_histories_ = self.shared_pool_state_.shared_histories
         self.adapter_configs_[config.adapter_name] = config
         if config.adapter_name == "mocl":
             self.task_embedding = torch.nn.Embedding(config.num_experts_, self.config_.dim_).to(device=self.device_)
@@ -674,6 +698,57 @@ class LLMModel(torch.nn.Module):
             init_lora_layer_weight(
                 transformer_layer, self.config_, config, index, weight
             )
+
+    def _iter_lora_linear_layers(self):
+        for transformer_layer in self.model_.layers_:
+            for linear_layer in transformer_layer.lora_state_dict().values():
+                yield linear_layer
+
+    def ensure_lora_expert(self, lora_name: str, source_name: Optional[str] = None):
+        config = self.adapter_configs_.get("moe-cl")
+        if config is None:
+            raise ValueError("moe-cl adapter must be initialized before creating shared experts")
+        for linear_layer in self._iter_lora_linear_layers():
+            if source_name is not None and source_name not in linear_layer.loras_:
+                continue
+            if lora_name not in linear_layer.loras_:
+                linear_layer.init_lora_weight(
+                    config.expert_config(0), lora_name=lora_name
+                )
+            if source_name is not None:
+                with torch.no_grad():
+                    linear_layer.loras_[lora_name].lora_a_.weight.copy_(
+                        linear_layer.loras_[source_name].lora_a_.weight
+                    )
+                    linear_layer.loras_[lora_name].lora_b_.weight.copy_(
+                        linear_layer.loras_[source_name].lora_b_.weight
+                    )
+
+    def delete_lora_expert(self, lora_name: str):
+        for linear_layer in self._iter_lora_linear_layers():
+            if lora_name in linear_layer.loras_:
+                del linear_layer.loras_[lora_name]
+
+    def lora_delta_map(self, lora_name: str):
+        return lora_delta_map_from_state_dict(dict(self.named_parameters()), lora_name)
+
+    def consolidate_lora_expert(
+        self, stored_name: str, working_name: str, history_size_before: int
+    ) -> float:
+        weight = 1.0 / float(history_size_before + 1)
+        with torch.no_grad():
+            for linear_layer in self._iter_lora_linear_layers():
+                if stored_name not in linear_layer.loras_ or working_name not in linear_layer.loras_:
+                    continue
+                stored = linear_layer.loras_[stored_name]
+                working = linear_layer.loras_[working_name]
+                stored.lora_a_.weight.add_(
+                    weight * (working.lora_a_.weight.to(stored.lora_a_.weight.device) - stored.lora_a_.weight)
+                )
+                stored.lora_b_.weight.add_(
+                    weight * (working.lora_b_.weight.to(stored.lora_b_.weight.device) - stored.lora_b_.weight)
+                )
+        return weight
 
     def from_pretrained(
         path: str,
@@ -745,8 +820,18 @@ class LLMModel(torch.nn.Module):
 
         # moes_中包含门控网络和任务分类器参数，score_为分类任务的输出层参数
         if "moe-cl" in self.adapter_configs_:
+            state = self.shared_pool_state_
             for name, param in self.named_parameters():
-                if "loras_" in name or "moes_" in name or "score_" in name:
+                if "loras_" in name:
+                    if ".loras_.probe." in name or ".loras_.working_shared." in name:
+                        continue
+                    if state.mode == "clustered" and ".loras_.shared" in name:
+                        match = re.search(r"\.loras_\.shared(\d+)\.", name)
+                        if match and int(match.group(1)) < state.shared_expert_count:
+                            lora_weight_dict[name] = param
+                        continue
+                    lora_weight_dict[name] = param
+                elif "moes_" in name or "score_" in name:
                     lora_weight_dict[name] = param
 
         # proj_network和task_embedding为计算旧任务权重的参数

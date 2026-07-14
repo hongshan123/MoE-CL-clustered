@@ -88,6 +88,9 @@ class MultiLoraBatchData:
     efficient_operator_: bool = True
     inference_mode_: bool = False
     diagonal_pos_: int = 1
+    selected_shared_id: int = 0
+    shared_lora_name: str = None
+    probe_only: bool = False
 
 
 @dataclass
@@ -194,6 +197,13 @@ class MixConfig(LoraConfig):
     # router_loss_: bool = True
     num_experts_: int = None
     act_fn_: str = None
+    shared_pool_mode_: str = "single"
+    max_shared_experts_: int = 3
+    shared_probe_steps_: int = 100
+    shared_similarity_threshold_: float = 0.02
+    shared_expert_count_: int = 1
+    task_to_shared_: Dict[int, int] = None
+    shared_histories_: Dict[int, List[int]] = None
     # # mixtral config
     # top_k_: int = None
     # # switch transformers config
@@ -221,6 +231,10 @@ class MixConfig(LoraConfig):
         # assert isinstance(self.num_experts_, int) and self.num_experts_ > 0
         assert self.act_fn_ is None or (isinstance(
             self.act_fn_, str) and self.act_fn_ in ACT2FN)
+        assert self.shared_pool_mode_ in ["single", "clustered"]
+        assert isinstance(self.max_shared_experts_, int) and self.max_shared_experts_ > 0
+        assert isinstance(self.shared_probe_steps_, int) and self.shared_probe_steps_ >= 0
+        assert isinstance(self.shared_similarity_threshold_, float)
         # if self.routing_strategy_ == "mixtral":
         #     assert isinstance(self.top_k_, int) and self.top_k_ > 0
         # elif self.routing_strategy_ == "switch":
@@ -253,6 +267,20 @@ class MixConfig(LoraConfig):
         self.batch_size_ = config.get("batch_size", 16)
         self.micro_batch_size_ = config.get("micro_batch_size", 8)
         self.act_fn_ = config.get("act_fn", None)
+        self.shared_pool_mode_ = config.get("shared_pool_mode", "single")
+        self.max_shared_experts_ = int(config.get("max_shared_experts", 3))
+        self.shared_probe_steps_ = int(config.get("shared_probe_steps", 100))
+        self.shared_similarity_threshold_ = float(config.get("shared_similarity_threshold", 0.02))
+        default_shared_count = 0 if self.shared_pool_mode_ == "clustered" else 1
+        self.shared_expert_count_ = int(config.get("shared_expert_count", default_shared_count))
+        self.task_to_shared_ = {
+            int(k): int(v)
+            for k, v in dict(config.get("task_to_shared", {})).items()
+        }
+        self.shared_histories_ = {
+            int(k): [int(tid) for tid in tids]
+            for k, tids in dict(config.get("shared_histories", {})).items()
+        }
         # if self.routing_strategy_ == "mixtral":
         #     self.router_init_range_ = config.get("router_init_range", 0.02)
         #     self.jitter_noise_ = config.get("jitter_noise", 0.0)
@@ -298,6 +326,18 @@ class MixConfig(LoraConfig):
         config["micro_batch_size"] = self.micro_batch_size_
         if self.act_fn_ is not None:
             config["act_fn"] = self.act_fn_
+        config["shared_pool_mode"] = self.shared_pool_mode_
+        config["max_shared_experts"] = self.max_shared_experts_
+        config["shared_probe_steps"] = self.shared_probe_steps_
+        config["shared_similarity_threshold"] = self.shared_similarity_threshold_
+        config["shared_expert_count"] = self.shared_expert_count_
+        config["task_to_shared"] = {
+            str(k): int(v) for k, v in (self.task_to_shared_ or {}).items()
+        }
+        config["shared_histories"] = {
+            str(k): [int(tid) for tid in tids]
+            for k, tids in (self.shared_histories_ or {}).items()
+        }
         # if self.routing_strategy_ == "mixtral":
         #     config["top_k"] = self.top_k_
         # elif self.routing_strategy_ == "switch":

@@ -286,7 +286,7 @@ class LlamaMLP(nn.Module):
 
         final_expert_states = []
         for e_id in expert_idxs:  # traversal all expert, including shared expert and specific expert
-            lora_name = f"expert{e_id}"
+            lora_name = e_id if isinstance(e_id, str) else f"expert{e_id}"
             if lora_name in self.w1_.loras_:
                 lora_data = hidden_states
                 w1 = self.w1_.loras_[lora_name].forward(common_w1, lora_data)

@@ -11,6 +11,11 @@ from .lora_linear import (Linear, Lora, dequantize_bnb_weight,
                           get_range_tensor, is_quantized)
 # MixLoRA MoEs
 from .mix_lora import MixtralSparseMoe
+from .shared_pool import (SharedPoolState, compute_lora_similarity,
+                          consolidate_parameter_pair, consolidate_state_dicts,
+                          decide_shared_assignment,
+                          lora_delta_map_from_state_dict,
+                          normalize_shared_pool_state)
 # Basic Abstract Class
 from .model import (LLMAttention, LLMDecoder, LLMFeedForward, LLMForCausalLM,
                     LLMOutput)
@@ -40,6 +45,13 @@ __all__ = [
     "Linear",
     "MixtralRouterLoss",
     "MixtralSparseMoe",
+    "SharedPoolState",
+    "compute_lora_similarity",
+    "consolidate_parameter_pair",
+    "consolidate_state_dicts",
+    "decide_shared_assignment",
+    "lora_delta_map_from_state_dict",
+    "normalize_shared_pool_state",
     "SwitchRouterLoss",
     "SwitchSparseMoe",
     "router_loss_dict",

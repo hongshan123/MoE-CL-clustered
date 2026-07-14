@@ -271,11 +271,13 @@ class Linear(nn.Module):
             self,
             lora_config: LoraConfig,
             lora_tensor=(None, None),
-            expert_idx: int = 0
+            expert_idx: int = 0,
+            lora_name: str = None
         ):
         out_dim, in_dim = self.base_layer_.weight.shape
-        self.loras_["expert"+str(expert_idx)] = Lora(self.base_layer_, (in_dim, out_dim), lora_config, self.device_)
-        self.loras_["expert"+str(expert_idx)].reset_parameters(lora_tensor)  # A 矩阵随机初始化，B 矩阵零初始化
+        name = lora_name if lora_name is not None else "expert"+str(expert_idx)
+        self.loras_[name] = Lora(self.base_layer_, (in_dim, out_dim), lora_config, self.device_)
+        self.loras_[name].reset_parameters(lora_tensor)  # A 矩阵随机初始化，B 矩阵零初始化
 
     def _appy_dora(self,
                    residual: torch.Tensor,

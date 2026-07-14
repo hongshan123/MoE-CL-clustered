@@ -17,6 +17,7 @@ class MixtralSparseMoe(torch.nn.Module):
         self.adapter_name_: str = config.adapter_name
         self.dtype_: torch.dtype = torch.float32
         if config.adapter_name == "moe-cl":
+            self.shared_pool_mode_ = config.shared_pool_mode_
             self.task_classifier_ = torch.nn.Linear(
                 args.dim_, config.num_experts_-1, bias=False, device=args.device_, dtype=self.dtype_)  # predicting task labels (4 tasks) using shared representations
             self.gate_ = torch.nn.Linear(
@@ -30,7 +31,32 @@ class MixtralSparseMoe(torch.nn.Module):
             input_dtype = hidden_states.dtype
             hidden_states = hidden_states.view(-1, hidden_dim).to(self.dtype_)
 
-            expert_idxs = [0, task_id]  # 0 is shared expert, and others are for each task
+            shared_lora_name = kwargs.get("shared_lora_name")
+            if shared_lora_name is None:
+                if self.shared_pool_mode_ == "clustered":
+                    shared_lora_name = f"shared{kwargs.get('selected_shared_id', 0)}"
+                else:
+                    shared_lora_name = 0
+            if kwargs.get("probe_only", False):
+                expert_idxs = [shared_lora_name]
+                if hasattr(mlp, "_mixlora_forward"):
+                    expert_states = mlp._mixlora_forward(self.act_, expert_idxs, hidden_states, input_dtype)
+                else:
+                    raise NotImplementedError("Not implement mixlora forward2!!!")
+                final_hidden_state = expert_states[0].reshape(
+                    batch_size, sequence_length, hidden_dim).to(input_dtype)
+
+                shared_state = expert_states[0].reshape(batch_size, sequence_length, hidden_dim)
+                attention_mask = kwargs["attention_mask"].to(device=hidden_states.device)
+                sequence_lengths = attention_mask.sum(dim=1, keepdim=True)
+                mask_expanded = attention_mask.unsqueeze(-1).expand_as(shared_state)
+                masked_shared_state = shared_state * mask_expanded
+                sum_shared_state = masked_shared_state.sum(dim=1)
+                avg_shared_state = sum_shared_state / sequence_lengths
+                classifier_logits = self.task_classifier_(avg_shared_state.to(self.dtype_))
+                classifier_probs = F.softmax(classifier_logits, dim=1, dtype=self.dtype_)
+                return final_hidden_state, classifier_probs
+            expert_idxs = [shared_lora_name, task_id]  # shared branch + current task-specific branch
             if hasattr(mlp, "_mixlora_forward"):
                 expert_states = mlp._mixlora_forward(self.act_, expert_idxs, hidden_states, input_dtype)
             else:
