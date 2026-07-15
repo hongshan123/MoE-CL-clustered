@@ -71,10 +71,18 @@ lr = config["lora"][0]["lr"]
 num_epochs = config["lora"][0]["num_epochs"]
 batch_size = config["lora"][0]["batch_size"]
 test_batch_size = config["lora"][0]["test_batch_size"]
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+RESULTS_ROOT = os.path.abspath(
+    os.environ.get("MOE_CL_OUTPUT_DIR", os.path.join(PROJECT_ROOT, "results"))
+)
 if args.debug:  # For debugging
     num_epochs = 1
     batch_size = 1
     test_batch_size = 1
+
+
+def adapter_output_dir() -> str:
+    return os.path.join(RESULTS_ROOT, adapter_name, benchmark, args.order)
 
 
 def load_base_model(device) -> Tuple[mlora.Tokenizer, mlora.LLMModel]:
@@ -102,7 +110,7 @@ def init_adapter_config(
         lora_weight = None
 
         if adapter_file:
-            adapter_dir = f"/root/MoE-CL/results/{adapter_name}/{benchmark}/{args.order}"
+            adapter_dir = adapter_output_dir()
             adapter_file_path = f"{adapter_dir}/{adapter_file}.bin"
             adapter_config_path = f"{adapter_dir}/{adapter_file}.json"
 
@@ -307,7 +315,7 @@ def get_ddp_model(model, rank):
         if args.load_adapter_file:
             model.load_state_dict(
                 state_dict=torch.load(
-                    f"/root/MoE-CL/results/{adapter_name}/{benchmark}/{args.order}/{args.load_adapter_file}.bin",
+                    os.path.join(adapter_output_dir(), f"{args.load_adapter_file}.bin"),
                     map_location=torch.device(rank),
                     weights_only=True,
                 )
@@ -521,15 +529,13 @@ def train(rank, world_size, train_dataset, val_dataset, all_test_datasets):
                             if (
                                 adapter_name == "sequential-ft-f"
                             ):  # Save all model parameters
-                                if not os.path.exists(
-                                    f"/root/MoE-CL/results/{adapter_name}/{benchmark}/{args.order}"
-                                ):
-                                    os.makedirs(
-                                        f"/root/MoE-CL/results/{adapter_name}/{benchmark}/{args.order}"
-                                    )
+                                os.makedirs(adapter_output_dir(), exist_ok=True)
                                 torch.save(
                                     ddp_model.module.state_dict(),
-                                    f"/root/MoE-CL/results/{adapter_name}/{benchmark}/{args.order}/{args.train_task}_finetuned.bin",
+                                    os.path.join(
+                                        adapter_output_dir(),
+                                        f"{args.train_task}_finetuned.bin",
+                                    ),
                                 )
 
                             elif is_clustered_shared_mode():
@@ -556,10 +562,9 @@ def train(rank, world_size, train_dataset, val_dataset, all_test_datasets):
     if rank == 0:
         now = datetime.now()
         formatted = now.strftime("%Y-%m-%d %H:%M:%S")
-        if not os.path.exists(f"/root/MoE-CL/results/{adapter_name}/{benchmark}/{args.order}"):
-            os.makedirs(f"/root/MoE-CL/results/{adapter_name}/{benchmark}/{args.order}")
+        os.makedirs(adapter_output_dir(), exist_ok=True)
         with open(
-            f"/root/MoE-CL/results/{adapter_name}/{benchmark}/{args.order}/log.txt", mode="a"
+            os.path.join(adapter_output_dir(), "log.txt"), mode="a"
         ) as f:
             f.write(f"[{formatted}]: Training {args.train_task} finished!\n")
         logging.info(f"Training {args.train_task} finished!")
@@ -579,7 +584,9 @@ def train(rank, world_size, train_dataset, val_dataset, all_test_datasets):
                 init_adapter_config(config, model)
                 model.load_state_dict(
                     state_dict=torch.load(
-                        f"/root/MoE-CL/results/{adapter_name}/{benchmark}/{args.order}/{args.train_task}_finetuned.bin",
+                        os.path.join(
+                            adapter_output_dir(), f"{args.train_task}_finetuned.bin"
+                        ),
                         map_location=torch.device(0),
                         weights_only=True,
                     )
@@ -641,7 +648,7 @@ def train(rank, world_size, train_dataset, val_dataset, all_test_datasets):
             now = datetime.now()
             formatted = now.strftime("%Y-%m-%d %H:%M:%S")
             with open(
-                f"/root/MoE-CL/results/{adapter_name}/{benchmark}/{args.order}/log.txt", mode="a"
+                os.path.join(adapter_output_dir(), "log.txt"), mode="a"
             ) as f:
                 f.write(f"[{formatted}]: {task_name} acc: {acc}\n")
             logging.info(f"{task_name} acc: {acc}\n")
@@ -654,9 +661,8 @@ def train(rank, world_size, train_dataset, val_dataset, all_test_datasets):
     print(f"Total time taken---------------------------------------------: {end_time - strat_time}")
 
 def save_adapter_weight(model: LLMModel, acc=None):
-    lora_output_dir = f"/root/MoE-CL/results/{adapter_name}/{benchmark}/{args.order}"
-    if not os.path.exists(lora_output_dir):
-        os.makedirs(lora_output_dir)
+    lora_output_dir = adapter_output_dir()
+    os.makedirs(lora_output_dir, exist_ok=True)
 
     lora_weight_dict = model.get_lora_weight_dict()
     lora_config_dict = model.adapter_configs_[adapter_name].export()

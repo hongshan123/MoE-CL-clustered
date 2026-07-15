@@ -26,6 +26,9 @@ python scripts/mtl5/download_mtl5_data.py
 Set `MOE_CL_DATA_ROOT` to use another root directory, or set
 `MOE_CL_MTL5_DATA_PATH` when the MTL5 JSON files live elsewhere.
 
+Training outputs default to `results/` under the repository root. Set
+`MOE_CL_OUTPUT_DIR` to store checkpoints and logs in another directory.
+
 ## Training
 
 Run the full continual learning training (including random initialization baseline + continual learning sequence **DBPedia → Amazon → Yahoo → AGNews**):
