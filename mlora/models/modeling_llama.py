@@ -459,7 +459,7 @@ class LlamaForCausalLM(LLMForCausalLM):
             hidden_act_=llm_config.hidden_act,
             rms_norm_eps_=llm_config.rms_norm_eps,
             max_seq_len_=4096,
-            rope_theta_=llm_config.rope_theta,
+            rope_theta_=getattr(llm_config, "rope_theta", 10000.0),
             pad_token_id_=llm_config.pad_token_id,
             attn_implementation_=attn_impl,
             device_=torch.device(device),
