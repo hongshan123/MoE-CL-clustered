@@ -1,3 +1,5 @@
+"""自回归文本生成器，封装采样、停止条件和流式输出。"""
+
 import logging
 from dataclasses import dataclass
 from typing import List, Tuple, Union

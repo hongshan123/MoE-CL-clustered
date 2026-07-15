@@ -1,3 +1,4 @@
+# 原始 MoE-CL 基线训练脚本，包含随机初始化和多种任务顺序示例。
 # 杀掉占卡进程
 ps -ef | grep '[t]raining_gpu' | awk '{print $2}' | xargs kill -9
 
@@ -5,7 +6,7 @@ SECONDS=0
 export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
 export NCCL_IB_TIMEOUT=22
 
-# 随机初始化
+# 随机初始化：用于计算 FWT 时的对照结果。
 python mlora.py \
     --base_model ../model/Llama-2-7b-hf \
     --config configs/mtl5/moe-cl.json \
@@ -13,7 +14,7 @@ python mlora.py \
     --order rand_init \
     --rand_init
 
-# 顺序 1
+# 顺序 1：DBpedia -> Amazon -> Yahoo -> AGNews。
 python mlora.py \
     --base_model ../model/Llama-2-7b-hf \
     --config configs/mtl5/moe-cl.json \

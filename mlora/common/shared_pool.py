@@ -1,3 +1,5 @@
+"""聚类共享 LoRA 池的状态、相似度计算和参数合并策略。"""
+
 import copy
 import math
 import re
@@ -13,6 +15,7 @@ LoraDeltaMap = Dict[str, LoraPair]
 
 @dataclass
 class SharedPoolState:
+    """共享专家池的可序列化状态，随 adapter checkpoint 一起保存。"""
     mode: str = "single"
     max_shared_experts: int = 3
     probe_steps: int = 100
@@ -22,6 +25,7 @@ class SharedPoolState:
     shared_histories: Dict[int, List[int]] = field(default_factory=dict)
 
     def export(self) -> Dict[str, object]:
+        """转换为 JSON 兼容字典，整数键改为字符串键。"""
         return {
             "shared_pool_mode": self.mode,
             "max_shared_experts": self.max_shared_experts,
@@ -37,6 +41,7 @@ class SharedPoolState:
 
     @classmethod
     def from_config(cls, config: Mapping[str, object]) -> "SharedPoolState":
+        """从新旧配置恢复共享池；旧 checkpoint 缺字段时使用安全默认值。"""
         mode = str(config.get("shared_pool_mode", "single"))
         default_shared_count = 0 if mode == "clustered" else 1
         task_to_shared = {
@@ -59,6 +64,7 @@ class SharedPoolState:
 
 
 def normalize_shared_pool_state(state: SharedPoolState) -> SharedPoolState:
+    """复制并规范化共享池状态，保证计数、映射和历史记录一致。"""
     state = copy.deepcopy(state)
     if state.mode not in {"single", "clustered"}:
         raise ValueError(f"shared_pool_mode must be single or clustered, got {state.mode}")
@@ -81,10 +87,12 @@ def normalize_shared_pool_state(state: SharedPoolState) -> SharedPoolState:
 
 
 def _as_float_vector(tensor: torch.Tensor) -> torch.Tensor:
+    """将任意设备/精度的参数展平为 CPU FP32 向量，便于稳定比较。"""
     return tensor.detach().to(device="cpu", dtype=torch.float32).reshape(-1)
 
 
 def _safe_cosine(lhs: torch.Tensor, rhs: torch.Tensor) -> Optional[float]:
+    """计算余弦相似度，并把零向量、NaN、Inf 统一降级为零。"""
     lhs = _as_float_vector(lhs)
     rhs = _as_float_vector(rhs)
     lhs_norm = torch.linalg.vector_norm(lhs)
@@ -98,11 +106,13 @@ def _safe_cosine(lhs: torch.Tensor, rhs: torch.Tensor) -> Optional[float]:
 
 
 def lora_delta(pair: LoraPair) -> torch.Tensor:
+    """将 LoRA 的 A、B 矩阵还原为等价的低秩权重增量 B @ A。"""
     lora_a, lora_b = pair
     return lora_b.detach().to(torch.float32) @ lora_a.detach().to(torch.float32)
 
 
 def compute_lora_similarity(lhs: LoraDeltaMap, rhs: LoraDeltaMap) -> float:
+    """对两组同名线性层的 LoRA 增量余弦相似度求平均。"""
     scores: List[float] = []
     for module_name in sorted(set(lhs).intersection(rhs)):
         score = _safe_cosine(lora_delta(lhs[module_name]), lora_delta(rhs[module_name]))
@@ -119,6 +129,7 @@ def compute_lora_similarity(lhs: LoraDeltaMap, rhs: LoraDeltaMap) -> float:
 def lora_delta_map_from_state_dict(
     state_dict: Mapping[str, torch.Tensor], lora_name: str
 ) -> LoraDeltaMap:
+    """从 state_dict 抽取指定 LoRA 名称的所有 A/B 参数对。"""
     escaped = re.escape(lora_name)
     a_pattern = re.compile(rf"^(.*\.loras_\.{escaped})\.lora_a_\.weight$")
     deltas: LoraDeltaMap = {}
@@ -141,6 +152,7 @@ def decide_shared_assignment(
     max_shared_experts: int,
     threshold: float,
 ) -> Tuple[int, str, float]:
+    """根据最大相似度和池容量，返回 CREATE 或 REUSE 的共享专家决策。"""
     if current_count <= 0:
         return 0, "CREATE", 0.0
 
@@ -161,6 +173,7 @@ def consolidate_parameter_pair(
     working_param: torch.Tensor,
     history_size_before: int,
 ) -> float:
+    """按 1/(历史任务数+1) 对单个共享参数做在线平均。"""
     weight = 1.0 / float(history_size_before + 1)
     with torch.no_grad():
         stored_param.add_(weight * (working_param.to(stored_param.device) - stored_param))
@@ -173,6 +186,7 @@ def consolidate_state_dicts(
     history_size_before: int,
     names: Optional[Iterable[str]] = None,
 ) -> float:
+    """对一组同名参数执行在线平均，用于合并临时共享专家。"""
     selected_names = list(names) if names is not None else sorted(set(stored).intersection(working))
     weight = 1.0 / float(history_size_before + 1)
     with torch.no_grad():

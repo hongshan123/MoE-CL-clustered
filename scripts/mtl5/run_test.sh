@@ -1,3 +1,4 @@
+# Tencent/HunYuan 配置的快速测试脚本。
 # 杀掉占卡进程
 ps -ef | grep '[t]raining_gpu' | awk '{print $2}' | xargs kill -9
 
@@ -5,6 +6,7 @@ SECONDS=0
 export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
 export NCCL_IB_TIMEOUT=22
 
+# 仅训练 DBpedia 任务，用于验证环境、模型加载和日志链路。
 python mlora.py \
     --base_model ../model/Hunyuan-7B-Instruct \
     --config configs/mtl5/moe-cl.json \

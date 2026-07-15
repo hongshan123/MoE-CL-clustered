@@ -1,3 +1,5 @@
+"""语言模型解码器和因果语言模型的抽象基类。"""
+
 from .modelargs import Masks, MultiLoraBatchData
 
 import torch

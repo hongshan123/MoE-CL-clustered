@@ -1,3 +1,5 @@
+"""日志、依赖检查和基础占位类型等通用工具。"""
+
 import importlib.metadata
 import importlib.util
 import logging

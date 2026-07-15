@@ -1,3 +1,5 @@
+"""命令行文本生成入口：加载基础模型和 LoRA 适配器后进行推理。"""
+
 import fire
 import torch
 

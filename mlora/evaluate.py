@@ -1,3 +1,5 @@
+"""MTL5 与 Tencent 基准的分布式验证和测试逻辑。"""
+
 import logging
 import string
 from typing import Any, Dict, List

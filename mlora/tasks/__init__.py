@@ -1,3 +1,5 @@
+"""任务注册入口，导出任务基类、度量指标和任务字典。"""
+
 from . import glue_tasks, qa_tasks
 from .common import (AutoMetric, BasicMetric, BasicTask, CasualTask,
                      CommonSenseTask, MultiTask, SequenceClassificationTask,

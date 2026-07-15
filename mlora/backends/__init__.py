@@ -1,3 +1,5 @@
+"""根据当前运行设备选择 CPU、CUDA 或 MPS 后端。"""
+
 from .common import BasicBackend
 from .cuda import CUDABackend
 from .mps import MPSBackend

@@ -1,6 +1,6 @@
 # coding=utf-8
 # Copyright (C) 2024 THL A29 Limited, a Tencent company.  All rights reserved.
-""" HunYuan model configuration"""
+"""HunYuan 模型配置，兼容 Transformers 的预训练配置接口。"""
 
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging

@@ -1,3 +1,5 @@
+"""模型类型到 m-LoRA 内部实现的注册表。"""
+
 from .modeling_llama import LlamaForCausalLM
 
 model_dict = {

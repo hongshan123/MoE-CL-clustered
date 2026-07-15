@@ -1,3 +1,5 @@
+"""提示词模板加载与渲染工具。"""
+
 import json
 import logging
 import os.path as osp

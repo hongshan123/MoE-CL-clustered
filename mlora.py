@@ -1,3 +1,5 @@
+"""MoE-CL 训练入口，负责数据构建、DDP 训练、评估和适配器保存。"""
+
 import argparse
 import json
 import logging
@@ -83,10 +85,12 @@ if args.debug:  # For debugging
 
 
 def adapter_output_dir() -> str:
+    """返回当前实验顺序对应的 checkpoint 与汇总日志目录。"""
     return os.path.join(RESULTS_ROOT, adapter_name, benchmark, args.order)
 
 
 def load_base_model(device) -> Tuple[mlora.Tokenizer, mlora.LLMModel]:
+    """在指定 DDP rank 的 GPU 上加载冻结的基础模型与分词器。"""
     logging.info(f"Initializing pre-trained model from {args.base_model}")
     model = mlora.LLMModel.from_pretrained(
         path=args.base_model,
@@ -103,6 +107,7 @@ def load_base_model(device) -> Tuple[mlora.Tokenizer, mlora.LLMModel]:
 def init_adapter_config(
     config: Dict[str, any], llm_model: mlora.LLMModel, adapter_file: str = None
 ) -> None:
+    """按配置新建 LoRA，或从上一个持续学习任务恢复适配器状态。"""
     if config["cutoff_len"] == -1:
         config["cutoff_len"] = llm_model.max_seq_len_
         logging.info(f"Setting cutoff_len to {llm_model.max_seq_len_} automatically.")
@@ -111,6 +116,7 @@ def init_adapter_config(
         lora_weight = None
 
         if adapter_file:
+            # JSON 除了普通 LoRA 超参数，还保存了共享池的历史分配信息。
             adapter_dir = adapter_output_dir()
             adapter_file_path = f"{adapter_dir}/{adapter_file}.bin"
             adapter_config_path = f"{adapter_dir}/{adapter_file}.json"
@@ -159,10 +165,12 @@ def init_adapter_config(
 
 
 def is_clustered_shared_mode() -> bool:
+    """判断本次实验是否启用了可增长的聚类共享 LoRA 池。"""
     return adapter_name == "moe-cl" and config["lora"][0].get("shared_pool_mode", "single") == "clustered"
 
 
 def _build_input_args(batch_data, task_id: int, shared_lora_name: str = None, probe_only: bool = False):
+    """把 DataLoader batch 转成模型前向所需的多 LoRA 批描述。"""
     batch_tokens = batch_data["tokens"]
     batch_labels = batch_data["label"]
     batch_masks = batch_data["mask"]
@@ -184,6 +192,7 @@ def _build_input_args(batch_data, task_id: int, shared_lora_name: str = None, pr
 
 
 def _set_trainable_for_probe(model: LLMModel, lora_name: str):
+    """探测阶段仅训练指定 LoRA，其余参数保持冻结。"""
     old_flags = {name: param.requires_grad for name, param in model.named_parameters()}
     for _, param in model.named_parameters():
         param.requires_grad = False
@@ -194,12 +203,14 @@ def _set_trainable_for_probe(model: LLMModel, lora_name: str):
 
 
 def _restore_trainable_flags(model: LLMModel, old_flags: Dict[str, bool]):
+    """恢复探测前的参数可训练标记，避免影响正式训练。"""
     for name, param in model.named_parameters():
         if name in old_flags:
             param.requires_grad = old_flags[name]
 
 
 def run_shared_probe(model: LLMModel, train_dataset, task_id: int, rank: int):
+    """短暂训练 probe LoRA，并返回其对各线性层产生的增量。"""
     state = model.shared_pool_state_
     model.ensure_lora_expert("probe")
     old_flags = _set_trainable_for_probe(model, "probe")
@@ -209,6 +220,7 @@ def run_shared_probe(model: LLMModel, train_dataset, task_id: int, rank: int):
     model.train()
     steps = 0
     torch.manual_seed(1337 + task_id)
+    # probe 只用于比较任务方向，不应消耗完整训练预算。
     for batch_data in dataloader:
         if steps >= state.probe_steps:
             break
@@ -227,6 +239,7 @@ def run_shared_probe(model: LLMModel, train_dataset, task_id: int, rank: int):
 
 
 def prepare_clustered_shared_training(model: LLMModel, train_dataset, task_id: int, rank: int):
+    """依据 probe 与已有共享专家的相似度，决定复用或新建共享专家。"""
     state = model.shared_pool_state_
     probe_delta = run_shared_probe(model, train_dataset, task_id, rank)
     similarities = {}
@@ -255,10 +268,12 @@ def prepare_clustered_shared_training(model: LLMModel, train_dataset, task_id: i
         logging.info(f"max_shared_experts = {state.max_shared_experts}")
 
     if decision == "CREATE":
+        # 新共享专家从 probe 初始化，使其带有当前任务的初始方向。
         model.ensure_lora_expert(f"shared{selected_shared_id}", source_name="probe")
         state.shared_expert_count = selected_shared_id + 1
         state.shared_histories.setdefault(selected_shared_id, [])
 
+    # working_shared 是当前任务的临时副本，训练结束后再写回共享池。
     model.ensure_lora_expert("working_shared", source_name=f"shared{selected_shared_id}")
     model.active_shared_lora_name_ = "working_shared"
     model.delete_lora_expert("probe")
@@ -266,6 +281,7 @@ def prepare_clustered_shared_training(model: LLMModel, train_dataset, task_id: i
 
 
 def finalize_clustered_shared_training(model: LLMModel, selected_shared_id: int, decision: str, task_id: int, rank: int):
+    """将临时共享分支合并回共享池，并持久化任务到共享专家的映射。"""
     state = model.shared_pool_state_
     history = state.shared_histories.setdefault(selected_shared_id, [])
     history_size_before = len(history)
@@ -274,6 +290,7 @@ def finalize_clustered_shared_training(model: LLMModel, selected_shared_id: int,
         model.ensure_lora_expert(shared_name, source_name="working_shared")
         lambda_t = 1.0
     else:
+        # 按历史任务数做递推平均，防止新任务完全覆盖旧共享知识。
         lambda_t = model.consolidate_lora_expert(
             shared_name, "working_shared", history_size_before
         )
@@ -296,10 +313,12 @@ def finalize_clustered_shared_training(model: LLMModel, selected_shared_id: int,
 
 
 def setup(rank, world_size):
+    """初始化单机 NCCL 进程组；每个 rank 对应一张可见 GPU。"""
     torch.distributed.init_process_group("nccl", rank=rank, world_size=world_size)
 
 
 def configure_distributed_environment() -> None:
+    """在父进程中准备 DDP rendezvous 地址和空闲端口，供子进程继承。"""
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     if "MASTER_PORT" in os.environ:
         return
@@ -310,10 +329,12 @@ def configure_distributed_environment() -> None:
 
 
 def cleanup():
+    """训练/测试完成后释放 DDP 进程组资源。"""
     torch.distributed.destroy_process_group()
 
 
 def get_ddp_model(model, rank):
+    """按实验方法初始化适配器、冻结策略并包装为 DDP 模型。"""
     if adapter_name in ["pertask-ft", "sequential-ft-p"]:
         init_adapter_config(config, model, args.load_adapter_file)
         ddp_model = DDP(model, device_ids=[rank])
@@ -368,6 +389,7 @@ def get_ddp_model(model, rank):
 
 
 def train(rank, world_size, train_dataset, val_dataset, all_test_datasets):
+    """执行单个持续学习任务的 DDP 训练、验证、保存和全任务测试。"""
     setup(rank, world_size)
     
     logging = setup_logging(
@@ -378,7 +400,7 @@ def train(rank, world_size, train_dataset, val_dataset, all_test_datasets):
     )
     logging.info(f"Starting training on GPU {rank}")
 
-    # STEP 1: ********************Training phase.********************
+    # 第一阶段：训练当前任务；聚类模式先做轻量 probe 决定共享分支。
     selected_shared_id = None
     shared_decision = None
     if not args.rand_init:
@@ -393,6 +415,7 @@ def train(rank, world_size, train_dataset, val_dataset, all_test_datasets):
         else:
             ddp_model = get_ddp_model(model, rank)
 
+        # 只有 requires_grad=True 的 LoRA/MoE 参数会在反向传播中产生梯度状态。
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
         sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
         dataloader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler)
@@ -466,6 +489,7 @@ def train(rank, world_size, train_dataset, val_dataset, all_test_datasets):
                 total_loss.backward()
 
                 if adapter_name == "moe-cl":
+                    # 任务分类器采用梯度反向层效果：此处手工翻转其梯度方向。
                     for layer in ddp_model.module.seq_module_:
                         layer = layer.wrapper_module_
                         if isinstance(layer, LlamaDecoderLayer):
@@ -562,7 +586,7 @@ def train(rank, world_size, train_dataset, val_dataset, all_test_datasets):
             if rank == 0:
                 save_adapter_weight(ddp_model.module, acc=best_acc)
 
-    # STEP 2: ********************Testing phase.********************
+    # 第二阶段：恢复当前 checkpoint，并在所有已知任务测试遗忘与迁移情况。
     # 2.1 Log output
     if args.debug:
         cleanup()
@@ -670,6 +694,7 @@ def train(rank, world_size, train_dataset, val_dataset, all_test_datasets):
     print(f"Total time taken---------------------------------------------: {end_time - strat_time}")
 
 def save_adapter_weight(model: LLMModel, acc=None):
+    """保存 LoRA/MoE 权重及可复现实验所需的 JSON 元数据。"""
     lora_output_dir = adapter_output_dir()
     os.makedirs(lora_output_dir, exist_ok=True)
 

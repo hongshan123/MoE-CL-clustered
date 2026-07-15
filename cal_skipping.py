@@ -1,3 +1,5 @@
+"""根据任务性能矩阵计算持续学习实验中的跳过比例。"""
+
 import numpy as np
 import pandas as pd
 

@@ -1,3 +1,5 @@
+"""从实验日志汇总各任务的准确率与召回率指标。"""
+
 import argparse
 import json
 import os

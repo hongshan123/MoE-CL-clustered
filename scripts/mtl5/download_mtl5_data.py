@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download public MTL5 source datasets and convert them to MoE-CL JSON files."""
+"""下载公开 MTL5 数据集，并转换为 MoE-CL 所需的 JSON 格式。"""
 
 import argparse
 import json

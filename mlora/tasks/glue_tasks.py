@@ -1,3 +1,5 @@
+"""预留的 GLUE 任务注册定义，目前默认处于注释状态。"""
+
 # from .common import SequenceClassificationTask
 # import torch
 

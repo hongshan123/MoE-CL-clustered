@@ -1,3 +1,5 @@
+"""CUDA 后端实现，封装 GPU 能力检测和混合精度上下文。"""
+
 from .common import BasicBackend
 import torch
 

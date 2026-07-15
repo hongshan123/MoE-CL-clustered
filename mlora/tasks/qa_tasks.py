@@ -1,3 +1,5 @@
+"""MTL5 与 Tencent3 分类数据集的读取、编码和 PyTorch Dataset 封装。"""
+
 import json
 import logging
 import math
@@ -26,6 +28,7 @@ TENCENT_DATA_PATH = os.environ.get(
 
 
 class QuestionAnswerTask(CommonSenseTask):
+    """分类标签集合与 accuracy 度量的轻量任务定义。"""
     def __init__(self, labels: List[str]) -> None:
         super().__init__()
         self.labels_ = labels
@@ -41,6 +44,7 @@ class QuestionAnswerTask(CommonSenseTask):
 
 # MTL5
 class MTL5DataLoaderBase:
+    """MTL5 JSON 分类数据的公共读取、截断和标签映射逻辑。"""
     def __init__(self,
                  dataset_name: str,
                  base_path: str,
@@ -52,6 +56,7 @@ class MTL5DataLoaderBase:
         self.label2id = label2id
 
     def get_data_path(self, is_train: bool, is_val: bool) -> str:
+        """根据训练/验证/测试标志返回对应 JSON 文件路径。"""
         if is_train:
             return f"{self.base_path}/{self.dataset_name.lower()}/train.json"
         elif is_val:
@@ -65,6 +70,7 @@ class MTL5DataLoaderBase:
                     is_val: bool = False,
                     debug: bool = False
                     ) -> List[DataClass2]:
+        """读取 JSON 样本，编码文本并过滤超过任务最大长度的样本。"""
         if debug: self.max_seq_length = 128
 
         data_path = self.get_data_path(is_train, is_val)
@@ -177,6 +183,7 @@ class Yahoo(MTL5DataLoaderBase):
 
 
 class MTL5Dataset(Dataset):
+    """将 MTL5 原始样本补齐到统一长度，供 DataLoader 直接堆叠。"""
     def __init__(
         self,
         name: str,
@@ -209,12 +216,13 @@ class MTL5Dataset(Dataset):
             max_train_tokens_len = max(max_train_tokens_len, len(data["tokens"]))
         logging.info(f"Max train tokens length: {max_train_tokens_len}/{cutoff_len}")
 
-        # Sort by tokens length or random
+        # 按长度排序可减少同一批内 padding；随机模式用于消除顺序偏差。
         if group_by_length:
             mtl5_data.sort(key=lambda x: len(x["tokens"]), reverse=True)
         else:
             random.shuffle(mtl5_data)
 
+        # 对齐到 8 的倍数，兼顾张量核效率与固定形状 DataLoader。
         seq_len = math.ceil(max_train_tokens_len / 8) * 8
         self.all_tokens_ = []
         self.all_mask_ = []
@@ -248,6 +256,7 @@ class MTL5Dataset(Dataset):
 
 # Tencent3
 class TencentDataLoaderBase:
+    """Tencent3 TSV 分类数据的公共字段拼接、读取和编码逻辑。"""
     def __init__(self,
                  dataset_name: str,
                  base_path: str,
@@ -267,6 +276,7 @@ class TencentDataLoaderBase:
             return f"{self.base_path}/{self.dataset_name.lower()}/test.tsv"
 
     def format_prompt(self, data_point: pd.Series) -> str:
+        """按字段映射组装英文键名的分类提示词。"""
         fields = []
         for key, field in self.field_mapping.items():
             if field in data_point:
@@ -348,6 +358,7 @@ class GongZhongPingLun(TencentDataLoaderBase):
 
 
 class TencentDataset(Dataset):
+    """将 Tencent3 二分类样本补齐为固定长度 PyTorch Dataset。"""
     def __init__(
         self,
         name,
@@ -359,9 +370,7 @@ class TencentDataset(Dataset):
         is_val=False,
         debug=False
     ):
-        """
-        Because all tasks are binary classification tasks, a binary classification header is connected at the top level of the model and modeled into a binary classification task.
-        """
+        """所有 Tencent3 任务共享二分类输出头。"""
         if name == "shipinhao":
             self.dataset = ShiPinHao()
         elif name == "xiaoshijie":

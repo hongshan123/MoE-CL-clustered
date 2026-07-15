@@ -1,4 +1,6 @@
-# Attention and Feed Forward
+"""模型公共构件的聚合导出，包括注意力、LoRA、MoE 与配置类型。"""
+
+# 注意力与前馈网络
 from .attention import (_flash_attn_available, apply_rotary_emb,
                         get_unpad_data, precompute_rope_angle,
                         prepare_4d_causal_attention_mask, repeat_kv,

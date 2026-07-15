@@ -1,3 +1,5 @@
+"""Hugging Face 分词器封装，统一编码、解码与特殊 token 处理。"""
+
 import logging
 from typing import List, Union
 

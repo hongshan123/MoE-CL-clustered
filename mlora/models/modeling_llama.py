@@ -1,3 +1,5 @@
+"""Llama 模型的 m-LoRA 版本：注意力、MLP、解码层和权重转换。"""
+
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -27,11 +29,13 @@ if _flash_attn_available:
 
 @dataclass
 class LlamaConfig(LLMModelArgs):
+    """Llama 架构参数，继承 m-LoRA 通用模型配置。"""
     rms_norm_eps_: float = 1e-6
 
 
 # Multi-headed attention from 'Attention Is All You Need' paper.
 class LlamaAttention(nn.Module):
+    """普通 Eager Llama 注意力层，底座投影由可挂载 LoRA 的 Linear 包装。"""
     def __init__(self, wq: nn.Module, wk: nn.Module, wv: nn.Module, wo: nn.Module, args: LlamaConfig):
         super().__init__()
         # attention
@@ -65,6 +69,7 @@ class LlamaAttention(nn.Module):
                 attention_mask: Optional[torch.Tensor] = None):
         batch_size, max_seq_len, _ = hidden_states.shape
 
+        # 先投影 Q/K/V，再拆成多头布局 [batch, heads, seq, head_dim]。
         xq = self.wq_.forward(hidden_states, input_args)
         xk = self.wk_.forward(hidden_states, input_args)
         xv = self.wv_.forward(hidden_states, input_args)
@@ -87,6 +92,7 @@ class LlamaAttention(nn.Module):
         xk = repeat_kv(xk, self.n_rep_)
         xv = repeat_kv(xv, self.n_rep_)
 
+        # 该路径会显式构造注意力矩阵，长序列训练时显存开销较高。
         attention_score = scaled_dot_product_attention(
             xq, xk, xv, attention_mask)
 
@@ -97,6 +103,7 @@ class LlamaAttention(nn.Module):
 
 
 class LlamaFlashAttention(LlamaAttention):
+    """Flash Attention 版本，使用变长 unpad/pad 减少注意力显存。"""
     def __init__(self, wq: nn.Module, wk: nn.Module, wv: nn.Module, wo: nn.Module, args: LlamaConfig):
         assert _flash_attn_available, "Flash Attention is not available"
         super().__init__(wq, wk, wv, wo, args)
@@ -238,6 +245,7 @@ LLAMA_ATTENTION_CLASSES = {
 
 
 class LlamaMLP(nn.Module):
+    """Llama SwiGLU 前馈网络，支持标准 LoRA 与 MixLoRA 专家前向。"""
     def __init__(self, w1: nn.Module, w2: nn.Module, w3: nn.Module, args: LlamaConfig) -> None:
         super().__init__()
         # feed forward
@@ -281,11 +289,13 @@ class LlamaMLP(nn.Module):
             return self.w2_.base_layer_.forward(act_result)
 
     def _mixlora_forward(self, act_fn, expert_idxs, hidden_states, input_dtype):  # hidden_states: batch_size * seq_len, dim
+        """复用底座 w1/w3 输出，再分别叠加所选专家的低秩增量。"""
         common_w1 = self.w1_.base_layer_.forward(hidden_states.to(input_dtype))
         common_w3 = self.w3_.base_layer_.forward(hidden_states.to(input_dtype))
 
         final_expert_states = []
-        for e_id in expert_idxs:  # traversal all expert, including shared expert and specific expert
+        for e_id in expert_idxs:
+            # expert_idxs 通常包含共享专家和当前任务专属专家两项。
             lora_name = e_id if isinstance(e_id, str) else f"expert{e_id}"
             if lora_name in self.w1_.loras_:
                 lora_data = hidden_states
@@ -310,6 +320,7 @@ class LlamaMLP(nn.Module):
 
 
 class LlamaRMSNorm(nn.Module):
+    """Llama 的 RMSNorm 实现，复用预训练权重且始终冻结。"""
     def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
         super().__init__()
         self.norm_eps_ = eps
@@ -323,6 +334,7 @@ class LlamaRMSNorm(nn.Module):
 
 
 class LlamaDecoderLayer(nn.Module):
+    """一个 Llama Transformer block：归一化、注意力、残差和 MoE MLP。"""
     def __init__(self, layer_id: int) -> None:
         super().__init__()
         self.layer_id_: int = layer_id
@@ -359,6 +371,7 @@ class LlamaDecoderLayer(nn.Module):
 
 
 class LlamaEmbedding(nn.Module):
+    """冻结的 token embedding 查表层。"""
     def __init__(self, embedding: torch.Tensor, pad_token: int):
         super().__init__()
         self.token_embedding: torch.Tensor = embedding
@@ -372,6 +385,7 @@ class LlamaEmbedding(nn.Module):
 
 
 class LlamaSequentialWrapper(nn.Module):
+    """把不同 Llama 子模块统一为顺序执行接口。"""
     def __init__(self, module: nn.Module):
         super().__init__()
         self.wrapper_module_ = module
@@ -401,6 +415,7 @@ class LlamaSequentialWrapper(nn.Module):
 
 
 class LlamaForCausalLM(LLMForCausalLM):
+    """m-LoRA 内部 Llama 模型，负责组装解码层并对接分类输出头。"""
     def __init__(self, config: LlamaConfig) -> None:
         self.config_ = config
         self.padding_idx_ = config.pad_token_id_
@@ -437,6 +452,7 @@ class LlamaForCausalLM(LLMForCausalLM):
                     additional_mask: List[Masks] = None,
                     diagonal: int = 1) -> torch.Tensor:
 
+        # 掩码统一扩展为四维，供普通注意力与 Flash 路径共享。
         return prepare_4d_causal_attention_mask(input_tokens=input_tokens, n_heads=1,
                                                 additional_mask=additional_mask, diagonal=diagonal,
                                                 dtype=self.config_.dtype_, device=self.config_.device_)
@@ -447,6 +463,7 @@ class LlamaForCausalLM(LLMForCausalLM):
                         use_sliding_window: bool = False,
                         device: str = get_backend().device_name() + ":0"):
         assert not use_sliding_window, "Llama model does not support SWA."
+        """将 Transformers Llama 权重映射到可插入 LoRA/MoE 的内部结构。"""
         llm_config: modeling_llama.LlamaConfig = llm_model.config
         llm_args = LlamaConfig(
             name_or_path_=llm_config.name_or_path,
@@ -527,6 +544,7 @@ class LlamaForCausalLM(LLMForCausalLM):
                     layer.post_attention_layernorm.weight, llm_args.rms_norm_eps_)
                 model.layers_.append(decoder)
         else:
+            # 直接复用 Hugging Face 的线性层参数，避免复制整套 7B 底座权重。
             for idx, layer in enumerate(llm_model.model.layers):  # copy weights from llm_model
                 decoder = LlamaDecoderLayer(idx)
                 decoder.self_attn_ = LLAMA_ATTENTION_CLASSES[llm_args.attn_implementation_](

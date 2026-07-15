@@ -1,3 +1,5 @@
+"""计算持续学习的平均准确率、后向迁移和前向迁移指标。"""
+
 import argparse
 import re
 from collections import defaultdict

@@ -1,3 +1,5 @@
+"""m-LoRA 对外公共接口，集中导出模型、配置、任务和后端能力。"""
+
 from .backends import get_backend
 # from .evaluator import EvaluateConfig, evaluate
 # from .dispatcher import TrainTask, Dispatcher

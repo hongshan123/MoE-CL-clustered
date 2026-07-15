@@ -1,3 +1,5 @@
+"""用于模型结构试验的简化 Llama 实现。"""
+
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple

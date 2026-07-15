@@ -1,3 +1,5 @@
+"""激活检查点包装器：以重算换取更低的训练显存。"""
+
 from typing import Tuple, Callable
 
 import torch

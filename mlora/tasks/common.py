@@ -1,3 +1,5 @@
+"""训练任务抽象、样本编码和准确率等指标实现。"""
+
 from mlora.tokenizer import Tokenizer
 from mlora.prompter import Prompter
 from mlora.common import DataClass

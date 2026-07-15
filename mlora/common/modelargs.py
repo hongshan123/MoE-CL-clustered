@@ -1,3 +1,5 @@
+"""模型结构、LoRA、MoE 路由和批数据的配置数据类。"""
+
 import copy
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List

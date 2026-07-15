@@ -1,3 +1,5 @@
+"""LoRA 线性层、低秩增量的自定义反向传播以及量化权重辅助函数。"""
+
 import math
 
 import torch
@@ -18,11 +20,13 @@ from typing import Dict, List, Tuple
 
 
 def is_quantized(weight: torch.nn.Parameter):
+    """判断参数是否来自 bitsandbytes 的 4/8 位量化类型。"""
     cls_name = weight.__class__.__name__
     return cls_name in ("Params4bit", "Int8Params")
 
 
 def dequantize_bnb_weight(weight: torch.nn.Parameter, state=None):
+    """将 bitsandbytes 权重临时反量化，供 DoRA 范数计算使用。"""
     cls_name = weight.__class__.__name__
     if cls_name not in ("Params4bit", "Int8Params"):
         return weight
@@ -49,6 +53,7 @@ g_max_range = 128
 
 
 def get_range_tensor(device: torch.device, batch_size: int = 1024):
+    """缓存批内索引张量，减少每次前向时的临时分配。"""
     global g_cached_range_tensor
     global g_max_range
     if device not in g_cached_range_tensor or batch_size > g_max_range:
@@ -59,6 +64,7 @@ def get_range_tensor(device: torch.device, batch_size: int = 1024):
 
 
 class LoraFunction(torch.autograd.Function):
+    """LoRA 增量的自定义 Autograd，只为低秩矩阵保存反向所需状态。"""
     @staticmethod
     def forward(ctx,
                 result: torch.Tensor,
@@ -67,6 +73,7 @@ class LoraFunction(torch.autograd.Function):
                 dropouts: List[float],
                 scalings: List[float],
                 *args):
+        # 冻结底座不需要梯度；只缓存低秩分支反向传播所需的张量。
         save_inputs = (data,)
 
         lora_range = get_range_tensor(data.device, data.shape[0])
@@ -107,6 +114,7 @@ class LoraFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
+        """从上游梯度解析计算每个 LoRA A、B 矩阵的梯度。"""
         grad_result = None
         grad_data = None
         grad_input_args = None
@@ -160,6 +168,7 @@ class LoraFunction(torch.autograd.Function):
 
 
 class Lora(nn.Module):
+    """单个 LoRA/DoRA 分支，维护低秩 A、B 矩阵和缩放系数。"""
     def __init__(self,
                  base_layer: nn.Module,
                  shape: Tuple[int, int],
@@ -201,6 +210,7 @@ class Lora(nn.Module):
         return weight_norm
 
     def reset_parameters(self, lora_tensor=(None, None)) -> None:
+        """随机初始化新专家，或从 checkpoint 恢复已有 A/B 参数。"""
         # if the lora_tensor is not (None, None), use it to init the lora weight
         assert isinstance(lora_tensor, Tuple)
         assert len(lora_tensor) == 2
@@ -229,6 +239,7 @@ class Lora(nn.Module):
 
     def apply_dora(
             self, residual: torch.Tensor, result_lora: torch.Tensor, hidden_states: torch.Tensor):
+        # DoRA 依据底座加 LoRA 后的列范数重新缩放输出。
         weight = self.base_layer_.weight
         if is_quantized(weight):
             # for 8bit and 4bit quantization
@@ -254,6 +265,7 @@ class Lora(nn.Module):
 
 
 class Linear(nn.Module):
+    """冻结底座线性层以及多个具名 LoRA 专家的容器。"""
     def __init__(self, base_layer: nn.Module, device: str):
         super().__init__()
 
@@ -274,6 +286,7 @@ class Linear(nn.Module):
             expert_idx: int = 0,
             lora_name: str = None
         ):
+        # 同一底座可按 expert 名称挂载多个低秩分支。
         out_dim, in_dim = self.base_layer_.weight.shape
         name = lora_name if lora_name is not None else "expert"+str(expert_idx)
         self.loras_[name] = Lora(self.base_layer_, (in_dim, out_dim), lora_config, self.device_)
@@ -284,6 +297,7 @@ class Linear(nn.Module):
                    lora_delta: torch.Tensor,
                    hidden_states: torch.Tensor,
                    input_args: MultiLoraBatchData):
+        """对 batch 的不同区间应用相应 DoRA/LoRA 分支。"""
         next_states = torch.zeros_like(residual)
         lora_range = get_range_tensor(
             next_states.device, batch_size=next_states.shape[0])
@@ -305,6 +319,7 @@ class Linear(nn.Module):
         return next_states
 
     def _efficient_impl(self, hidden_states: torch.Tensor, input_args: MultiLoraBatchData) -> torch.Tensor:
+        """使用 LoraFunction 批量计算所有 LoRA 分支，减少 Python 调度开销。"""
         # hidden_states shape is: batch_size * max_seq_len * dim
         # result = hidden_states @ self.weight_.transpose(0, 1)
         residual = self.base_layer_.forward(hidden_states)
@@ -345,6 +360,7 @@ class Linear(nn.Module):
         return next_states.to(hidden_states.dtype)
 
     def _compatible_impl(self, hidden_states: torch.Tensor, input_args: MultiLoraBatchData) -> torch.Tensor:
+        """逐分支调用 PyTorch 模块的兼容实现，便于调试与非标准场景。"""
         # hidden_states shape is: batch_size * max_seq_len * dim
         # result = hidden_states @ self.weight_.transpose(0, 1)
         residual = self.base_layer_.forward(hidden_states)
@@ -371,6 +387,7 @@ class Linear(nn.Module):
         return next_states
 
     def forward(self, hidden_states: torch.Tensor, input_args: MultiLoraBatchData) -> torch.Tensor:
+        """执行冻结底座线性变换，并叠加当前 batch 选择的 LoRA 增量。"""
         if input_args.efficient_operator_:
             return self._efficient_impl(hidden_states, input_args)
         else:

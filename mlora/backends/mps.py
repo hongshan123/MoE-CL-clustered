@@ -1,3 +1,5 @@
+"""Apple MPS 后端实现。"""
+
 from .common import BasicBackend
 import contextlib
 import torch

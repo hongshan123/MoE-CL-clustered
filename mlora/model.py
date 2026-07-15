@@ -1,3 +1,5 @@
+"""通用语言模型封装：加载底座、管理 LoRA 适配器并组织前向计算。"""
+
 import json
 import logging
 import math
@@ -26,6 +28,7 @@ else:
 
 
 class CasualOutputLayer(nn.Module):
+    """自回归语言模型输出头与 next-token 交叉熵损失。"""
     def __init__(self, vocab_size: int, weight: torch.nn.Linear):
         super().__init__()
         self.vocab_size_: int = vocab_size
@@ -57,6 +60,7 @@ class CasualOutputLayer(nn.Module):
 
 
 class ClassificationOutputLayer(nn.Module):
+    """通用分类输出头：从最后一个非 padding token 取句向量分类。"""
     def __init__(
         self,
         task_type: str,
@@ -102,6 +106,7 @@ class ClassificationOutputLayer(nn.Module):
                 labels, dtype=self.label_dtype_, device=output_logits.device
             )
         batch_size = input_ids.shape[0]
+        # 每条样本在最后一个非 padding 位置取分类 logits。
         sequence_lengths = (torch.eq(input_ids, self.pad_id_).int().argmax(-1) - 1).to(
             output_logits.device
         )
@@ -120,6 +125,7 @@ class ClassificationOutputLayer(nn.Module):
 
 
 class MTL5ClassificationOutputLayer(nn.Module):
+    """MTL5 多任务分类头：为四个标签空间分别维护一个线性层。"""
     def __init__(
         self,
         task_type: str,
@@ -235,6 +241,7 @@ class MTL5ClassificationOutputLayer(nn.Module):
 
 
 class OutputLayer(torch.nn.Module):
+    """按 batch 中的 LoRA 配置切片，调用当前任务对应的输出头。"""
     def __init__(self):
         super().__init__()
         self.layers_: Union[CasualOutputLayer, ClassificationOutputLayer] = None
@@ -265,6 +272,7 @@ def init_lora_layer_weight(
     index,
     weight: Optional[Dict[str, torch.Tensor]],
 ):
+    """在一个 Transformer 层中创建或恢复目标投影上的 LoRA/MoE 专家。"""
     target = config.target_modules_
     linear_layer_list = []
     linear_layer_name_list = []
@@ -274,6 +282,7 @@ def init_lora_layer_weight(
 
     # Initialize gate and task classifier weight
     if config.adapter_name == "moe-cl":
+        # gate 与任务分类器属于 MoE 层参数，和 LoRA 权重一同恢复。
         gate_layer_name = (
             f"seq_module_.layer{layer.layer_id_}.wrapper_module_.mlp_.moes_.gate_.weight"
         )
@@ -327,6 +336,7 @@ def init_lora_layer_weight(
         if layer_name in target and target[layer_name]:
             if layer_name in moe_layer_name_list:
                 if config.adapter_name == "moe-cl" and config.shared_pool_mode_ == "clustered":
+                    # 聚类模式的共享专家与任务专家具有不同命名空间。
                     expert_names = [f"shared{sid}" for sid in range(config.shared_expert_count_)]
                     expert_names += [f"expert{expert_idx}" for expert_idx in range(1, config.num_experts_)]
                 else:
@@ -349,6 +359,7 @@ def init_lora_layer_weight(
 
 
 class OutputSequentialWrapper(torch.nn.Module):
+    """把输出头适配为顺序 Transformer 栈所需的 tuple 输入/输出协议。"""
     def __init__(self, module: torch.nn.Module):
         super().__init__()
         self.wrapper_module_ = module
@@ -362,6 +373,7 @@ class OutputSequentialWrapper(torch.nn.Module):
 
 
 class LLMModel(torch.nn.Module):
+    """将 Llama 顺序栈、任务输出头、LoRA 配置和共享池状态组合为完整模型。"""
     def __init__(self, model: LLMForCausalLM):
         super().__init__()
         args: LLMModelArgs = model.config_
@@ -391,9 +403,11 @@ class LLMModel(torch.nn.Module):
 
     # compute the model: output probs
     def forward(self, input_args: MultiLoraBatchData) -> List[LLMModelOutput]:
+        """执行一次多 LoRA 前向，并在训练模式下填充每个切片的损失。"""
         assert input_args.batch_tokens_ is not None
 
-        labels = input_args.batch_labels_  # labels shape: (batch_size, seq_len)
+        # tokens/mask/labels 从 CPU batch 移到当前 rank 对应设备。
+        labels = input_args.batch_labels_
         if isinstance(input_args.batch_tokens_, torch.Tensor):
             tokens = input_args.batch_tokens_.to(dtype=torch.int64, device=self.device_)
         else:
@@ -620,7 +634,9 @@ class LLMModel(torch.nn.Module):
     def init_lora_layer_weight(
         self, config: LoraConfig, weight: Optional[Dict[str, torch.Tensor]]
     ):
+        """初始化输出头与所有 Transformer 层的 LoRA/MoE 参数。"""
         if isinstance(config, MixConfig) and config.adapter_name == "moe-cl":
+            # 共享池状态来自配置或 checkpoint，先规范化再写回运行时配置。
             self.shared_pool_state_ = normalize_shared_pool_state(
                 SharedPoolState(
                     mode=config.shared_pool_mode_,
@@ -700,11 +716,13 @@ class LLMModel(torch.nn.Module):
             )
 
     def _iter_lora_linear_layers(self):
+        """顺序遍历所有可挂载 LoRA 的线性层。"""
         for transformer_layer in self.model_.layers_:
             for linear_layer in transformer_layer.lora_state_dict().values():
                 yield linear_layer
 
     def ensure_lora_expert(self, lora_name: str, source_name: Optional[str] = None):
+        """确保每层都存在指定专家；可选地从另一个专家复制初始化。"""
         config = self.adapter_configs_.get("moe-cl")
         if config is None:
             raise ValueError("moe-cl adapter must be initialized before creating shared experts")
@@ -725,16 +743,19 @@ class LLMModel(torch.nn.Module):
                     )
 
     def delete_lora_expert(self, lora_name: str):
+        """从所有线性层删除临时专家，例如 probe 或 working_shared。"""
         for linear_layer in self._iter_lora_linear_layers():
             if lora_name in linear_layer.loras_:
                 del linear_layer.loras_[lora_name]
 
     def lora_delta_map(self, lora_name: str):
+        """导出某个专家在所有目标层的低秩增量参数对。"""
         return lora_delta_map_from_state_dict(dict(self.named_parameters()), lora_name)
 
     def consolidate_lora_expert(
         self, stored_name: str, working_name: str, history_size_before: int
     ) -> float:
+        """将 working 专家按历史任务数平均合并到持久共享专家。"""
         weight = 1.0 / float(history_size_before + 1)
         with torch.no_grad():
             for linear_layer in self._iter_lora_linear_layers():
@@ -761,6 +782,7 @@ class LLMModel(torch.nn.Module):
         double_quant: bool = True,
         quant_type: str = "nf4",
     ):
+        """加载 HF 底座并转换为内部可插入 LoRA/MoE 的模型结构。"""
         # load_dtype will change the precision of LLaMA pre-trained model
         # when loading with quantization (bits = 8 or bits = 4), load_dtype will only influence the actual computing precision
         if load_dtype not in [torch.bfloat16, torch.float16, torch.float32]:
@@ -816,6 +838,7 @@ class LLMModel(torch.nn.Module):
         return LLMModel(model)
 
     def get_lora_weight_dict(self) -> Dict[str, torch.Tensor]:
+        """筛选 checkpoint 所需的小型参数，不保存冻结的基础模型权重。"""
         lora_weight_dict = {}
 
         # moes_中包含门控网络和任务分类器参数，score_为分类任务的输出层参数
@@ -848,6 +871,7 @@ class LLMModel(torch.nn.Module):
         return lora_weight_dict
 
     def load_adapter_weight(self, path: str, adapter_name: str):
+        """从 .json 与 .bin 文件恢复一个命名适配器。"""
         with open(f"{path}.json", "r", encoding="utf8") as fp:
             lora_config = MixConfig().from_config(json.load(fp)).check()
         lora_config.adapter_name = adapter_name

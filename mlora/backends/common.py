@@ -1,3 +1,5 @@
+"""计算后端的抽象接口和与设备无关的随机数工具。"""
+
 from mlora.utils import NoneContexts
 import logging
 import random

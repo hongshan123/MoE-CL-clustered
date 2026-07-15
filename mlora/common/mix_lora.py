@@ -1,3 +1,5 @@
+"""MoE-CL 路由器：融合共享 LoRA 与任务专属 LoRA 分支。"""
+
 from typing import List, Tuple
 
 import torch
@@ -9,6 +11,7 @@ from .modelargs import LLMModelArgs, MixConfig
 
 
 class MixtralSparseMoe(torch.nn.Module):
+    """MoE-CL 路由模块：融合共享 LoRA 与当前任务专属 LoRA。"""
     def __init__(self, args: LLMModelArgs, config: MixConfig, layer_ind: int) -> None:
         super().__init__()
 
@@ -17,6 +20,7 @@ class MixtralSparseMoe(torch.nn.Module):
         self.adapter_name_: str = config.adapter_name
         self.dtype_: torch.dtype = torch.float32
         if config.adapter_name == "moe-cl":
+            # task_classifier 预测句子级任务，gate 在 token 级分配两路比例。
             self.shared_pool_mode_ = config.shared_pool_mode_
             self.task_classifier_ = torch.nn.Linear(
                 args.dim_, config.num_experts_-1, bias=False, device=args.device_, dtype=self.dtype_)  # predicting task labels (4 tasks) using shared representations
@@ -26,6 +30,7 @@ class MixtralSparseMoe(torch.nn.Module):
         self.experts_: int = config.num_experts_ if isinstance(config.num_experts_, int) else config.num_experts_[layer_ind]
 
     def forward(self, mlp: LLMFeedForward, hidden_states: torch.Tensor, task_id, **kwargs) -> Tuple:  # mlp:LlamaMLP
+        """计算当前适配器方法的专家输出，并返回融合后的隐藏状态。"""
         if self.adapter_name_ == "moe-cl":  # MoE-CL
             batch_size, sequence_length, hidden_dim = hidden_states.shape
             input_dtype = hidden_states.dtype
@@ -56,13 +61,15 @@ class MixtralSparseMoe(torch.nn.Module):
                 classifier_logits = self.task_classifier_(avg_shared_state.to(self.dtype_))
                 classifier_probs = F.softmax(classifier_logits, dim=1, dtype=self.dtype_)
                 return final_hidden_state, classifier_probs
-            expert_idxs = [shared_lora_name, task_id]  # shared branch + current task-specific branch
+            # 正式训练固定计算共享分支与当前任务专属分支。
+            expert_idxs = [shared_lora_name, task_id]
             if hasattr(mlp, "_mixlora_forward"):
                 expert_states = mlp._mixlora_forward(self.act_, expert_idxs, hidden_states, input_dtype)
             else:
                 raise NotImplementedError("Not implement mixlora forward2!!!")
 
-            router_logits = self.gate_(hidden_states)  # using token-wise gate network
+            # gate 对每个 token 产生两个分支的归一化权重。
+            router_logits = self.gate_(hidden_states)
             router_logits = F.softmax(router_logits, dim=1, dtype=self.dtype_)
             expert1_weights = router_logits[:, 0].unsqueeze(1)  # shape: (batch_size * seq_len, 1)
             expert2_weights = router_logits[:, 1].unsqueeze(1)  # shape: (batch_size * seq_len, 1)

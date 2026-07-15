@@ -1,3 +1,5 @@
+"""CPU 后端实现，提供 CPU 上的默认设备与上下文行为。"""
+
 from .common import BasicBackend
 import contextlib
 import logging

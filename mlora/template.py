@@ -1,4 +1,6 @@
-shipinhao_template = f"""Please classify the following text, 0 indicates normal text, 1 indicates non-compliant text: 
+"""Tencent3 分类任务使用的原始提示词模板。"""
+
+shipinhao_template = f"""Please classify the following text, 0 indicates normal text, 1 indicates non-compliant text:
 Title: {{title}}, ParentComment: {{parentComment}}, SubComment{{subComment}}
 Result: 
 """

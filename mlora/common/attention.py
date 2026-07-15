@@ -1,3 +1,5 @@
+"""旋转位置编码、掩码构造以及普通/Flash 注意力辅助函数。"""
+
 import math
 from typing import List, Optional, Tuple
 
