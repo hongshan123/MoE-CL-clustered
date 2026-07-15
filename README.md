@@ -28,6 +28,8 @@ Set `MOE_CL_DATA_ROOT` to use another root directory, or set
 
 Training outputs default to `results/` under the repository root. Set
 `MOE_CL_OUTPUT_DIR` to store checkpoints and logs in another directory.
+For single-node DDP training, an available rendezvous port is selected
+automatically; set `MASTER_PORT` to use a specific port.
 
 ## Training
 

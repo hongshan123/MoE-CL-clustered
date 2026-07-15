@@ -2,6 +2,7 @@ import argparse
 import json
 import logging
 import os
+import socket
 import sys
 from datetime import datetime
 from typing import Dict, Tuple
@@ -295,9 +296,17 @@ def finalize_clustered_shared_training(model: LLMModel, selected_shared_id: int,
 
 
 def setup(rank, world_size):
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "12355"
     torch.distributed.init_process_group("nccl", rank=rank, world_size=world_size)
+
+
+def configure_distributed_environment() -> None:
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    if "MASTER_PORT" in os.environ:
+        return
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as socket_:
+        socket_.bind((os.environ["MASTER_ADDR"], 0))
+        os.environ["MASTER_PORT"] = str(socket_.getsockname()[1])
 
 
 def cleanup():
@@ -726,6 +735,7 @@ if __name__ == "__main__":
         raise f"benchmark {config['benchmark']} not supported"
 
     world_size = torch.cuda.device_count()
+    configure_distributed_environment()
     torch.multiprocessing.spawn(
         train,
         args=(world_size, train_dataset, val_dataset, all_test_datasets),
