@@ -42,6 +42,7 @@ def setup_logging(rank: int, world_size: int, log_level: str = "INFO", log_file:
         # Create directory if it doesn't exist
         base, ext = os.path.splitext(log_file)
         rank_log_file = f"{base}_rank{rank}{ext}"
+        os.makedirs(os.path.dirname(os.path.abspath(rank_log_file)), exist_ok=True)
         file_handler = logging.FileHandler(rank_log_file)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
