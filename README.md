@@ -12,6 +12,20 @@ pip install -r requirements.txt
 
 Download the **Llama-2-7b-hf** model into the `../model/Llama-2-7b-hf/` directory.
 
+## MTL5 Dataset Preparation
+
+The MTL5 loaders default to `/home/star/disk-7t/niuxiangqi/data/mtl15`. Download and
+convert the four public datasets on the training server with:
+
+```bash
+cd /home/star/disk-7t/niuxiangqi/hongshan/MoE-CL-clustered
+python -m pip install "datasets>=3.4.1,<4.4.0,!=4.0.*,!=4.1.0"
+python scripts/mtl5/download_mtl5_data.py
+```
+
+Set `MOE_CL_DATA_ROOT` to use another root directory, or set
+`MOE_CL_MTL5_DATA_PATH` when the MTL5 JSON files live elsewhere.
+
 ## Training
 
 Run the full continual learning training (including random initialization baseline + continual learning sequence **DBPedia → Amazon → Yahoo → AGNews**):

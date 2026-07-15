@@ -1,6 +1,7 @@
 import json
 import logging
 import math
+import os
 import random
 from typing import Dict, List
 
@@ -12,6 +13,16 @@ from mlora.common import DataClass, DataClass2
 from mlora.tokenizer import Tokenizer
 
 from .common import AutoMetric, BasicMetric, CommonSenseTask
+
+
+DEFAULT_DATA_ROOT = "/home/star/disk-7t/niuxiangqi/data"
+DATA_ROOT = os.environ.get("MOE_CL_DATA_ROOT", DEFAULT_DATA_ROOT)
+MTL5_DATA_PATH = os.environ.get(
+    "MOE_CL_MTL5_DATA_PATH", os.path.join(DATA_ROOT, "mtl15")
+)
+TENCENT_DATA_PATH = os.environ.get(
+    "MOE_CL_TENCENT_DATA_PATH", os.path.join(DATA_ROOT, "tencent3")
+)
 
 
 class QuestionAnswerTask(CommonSenseTask):
@@ -92,7 +103,7 @@ class AGNews(MTL5DataLoaderBase):
     def __init__(self):
         super().__init__(
             dataset_name="AGNews",
-            base_path="../data/mtl15",
+            base_path=MTL5_DATA_PATH,
             label2id={
                 'World': 0,
                 'Sports': 1,
@@ -107,7 +118,7 @@ class Amazon(MTL5DataLoaderBase):
     def __init__(self):
         super().__init__(
             dataset_name="Amazon",
-            base_path="../data/mtl15",
+            base_path=MTL5_DATA_PATH,
             label2id={
                 'very negative': 0,
                 'negative': 1,
@@ -123,7 +134,7 @@ class DBpedia(MTL5DataLoaderBase):
     def __init__(self):
         super().__init__(
             dataset_name="DBpedia",
-            base_path="../data/mtl15",
+            base_path=MTL5_DATA_PATH,
             label2id={
                 'Company': 0,
                 'Educational Institution': 1,
@@ -148,7 +159,7 @@ class Yahoo(MTL5DataLoaderBase):
     def __init__(self):
         super().__init__(
             dataset_name="Yahoo",
-            base_path="../data/mtl15",
+            base_path=MTL5_DATA_PATH,
             label2id={
                 'Society & Culture': 0,
                 'Science & Mathematics': 1,
@@ -302,7 +313,7 @@ class ShiPinHao(TencentDataLoaderBase):
     def __init__(self):
         super().__init__(
             dataset_name="ShiPinHao",
-            base_path="../data/tencent3",
+            base_path=TENCENT_DATA_PATH,
             field_mapping={
                 'Title': '标题',
                 'ParentComment': '父评',
@@ -315,7 +326,7 @@ class XiaoShiJie(TencentDataLoaderBase):
     def __init__(self):
         super().__init__(
             dataset_name="XiaoShiJie",
-            base_path="../data/tencent3",
+            base_path=TENCENT_DATA_PATH,
             field_mapping={
                 'Title': '主帖标题',
                 'ParentComment': '父评信息',
@@ -328,7 +339,7 @@ class GongZhongPingLun(TencentDataLoaderBase):
     def __init__(self):
         super().__init__(
             dataset_name="GongZhongPingLun",
-            base_path="../data/tencent3",
+            base_path=TENCENT_DATA_PATH,
             field_mapping={
                 'Title': '文章标题',
                 'Content': '评论内容'

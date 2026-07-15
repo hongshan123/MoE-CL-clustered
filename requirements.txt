@@ -1,5 +1,5 @@
 torch>=2.1.2
-datasets
+datasets>=3.4.1,<4.4.0,!=4.0.*,!=4.1.0
 evaluate
 accelerate
 transformers
