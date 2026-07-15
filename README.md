@@ -30,6 +30,9 @@ Training outputs default to `results/` under the repository root. Set
 `MOE_CL_OUTPUT_DIR` to store checkpoints and logs in another directory.
 For single-node DDP training, an available rendezvous port is selected
 automatically; set `MASTER_PORT` to use a specific port.
+The clustered MTL5 configuration uses a memory-safe per-GPU training batch size
+of 1 and evaluation batch size of 8. Four GPUs therefore use a global training
+batch size of 4.
 
 ## Training
 

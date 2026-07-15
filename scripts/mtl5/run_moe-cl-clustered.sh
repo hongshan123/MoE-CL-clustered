@@ -1,6 +1,7 @@
 SECONDS=0
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export NCCL_IB_TIMEOUT="${NCCL_IB_TIMEOUT:-22}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 BASE_MODEL="${BASE_MODEL:-../model/Llama-2-7b-hf}"
 
 python mlora.py \
